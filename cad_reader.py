@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: GPL-3.0-or-later
+"""Read DXF entities, build parcel polygons, and map text attributes."""
 
 import os
 
 from osgeo import ogr
 
-from qgis.PyQt.QtCore import QVariant
 from qgis.core import (
     QgsFeature,
     QgsField,
@@ -18,6 +18,40 @@ from qgis.core import (
 )
 
 import processing
+
+from .output_safety import ensure_new_output
+from .qgis_compat import (
+    GEOMETRY_POINT,
+    WRITER_CREATE_OR_OVERWRITE_FILE,
+    WRITER_NO_ERROR,
+)
+from .qt_compat import FIELD_STRING
+
+
+MAX_MAPPINGS = 10
+
+
+class ParcelForgeCanceled(RuntimeError):
+    """Raised when the user cancels a processing operation."""
+
+
+def _is_canceled(feedback):
+    return bool(
+        feedback is not None
+        and feedback.isCanceled()
+    )
+
+
+def _check_canceled(feedback):
+    if _is_canceled(feedback):
+        raise ParcelForgeCanceled(
+            "ParcelForge was canceled. No output was written."
+        )
+
+
+def _report(progress_callback, message, percent):
+    if progress_callback:
+        progress_callback(message, percent)
 
 
 LAYER_FIELD_CANDIDATES = [
@@ -193,7 +227,7 @@ def scan_layers(dwg_path):
 
         layer.ResetReading()
 
-    return (
+    result = (
         sorted(
             boundary_layers,
             key=str.upper
@@ -203,6 +237,8 @@ def scan_layers(dwg_path):
             key=str.upper
         ),
     )
+    dataset = None
+    return result
 
 
 def _collect_boundary_geometries(
@@ -309,8 +345,7 @@ def _text_records(
                 continue
 
             if QgsWkbTypes.geometryType(
-                    geometry.wkbType()) == (
-                    QgsWkbTypes.PointGeometry):
+                    geometry.wkbType()) == GEOMETRY_POINT:
                 point_geometry = geometry
             else:
                 point_geometry = (
@@ -324,10 +359,15 @@ def _text_records(
                         geometry.centroid()
                     )
 
-            if point_geometry and not point_geometry.isEmpty():
+            text_value = str(value).strip()
+
+            if (
+                    text_value
+                    and point_geometry
+                    and not point_geometry.isEmpty()):
                 records.append((
                     point_geometry,
-                    str(value).strip()
+                    text_value
                 ))
 
         layer.ResetReading()
@@ -342,12 +382,15 @@ def _memory_line_layer(geometries):
         "memory"
     )
     provider = layer.dataProvider()
-    provider.addAttributes([
+    if not provider.addAttributes([
         QgsField(
             "source",
-            QVariant.String
+            FIELD_STRING
         )
-    ])
+    ]):
+        raise RuntimeError(
+            "Could not create the temporary boundary field."
+        )
     layer.updateFields()
 
     features = []
@@ -356,6 +399,7 @@ def _memory_line_layer(geometries):
         prepared = QgsGeometry(
             geometry
         )
+        prepared.convertToStraightSegment()
 
         if QgsWkbTypes.isSingleType(
                 prepared.wkbType()):
@@ -370,9 +414,52 @@ def _memory_line_layer(geometries):
         feature["source"] = "DXF"
         features.append(feature)
 
-    provider.addFeatures(features)
+    added, _ = provider.addFeatures(features)
+    if not added or layer.featureCount() != len(features):
+        raise RuntimeError("Some boundary geometries could not be loaded.")
     layer.updateExtents()
     return layer
+
+
+def _validate_mappings(mappings):
+    if not mappings:
+        raise RuntimeError(
+            "At least one attribute mapping is required."
+        )
+
+    if len(mappings) > MAX_MAPPINGS:
+        raise RuntimeError(
+            "ParcelForge supports a maximum of {0} attribute mappings."
+            .format(MAX_MAPPINGS)
+        )
+
+    validated = []
+
+    for number, mapping in enumerate(mappings, 1):
+        if not isinstance(mapping, (list, tuple)) or len(mapping) != 2:
+            raise RuntimeError(
+                "Attribute Mapping {0} is invalid."
+                .format(number)
+            )
+
+        field_name = str(mapping[0] or "").strip()
+        text_layer = str(mapping[1] or "").strip()
+
+        if not field_name:
+            raise RuntimeError(
+                "Attribute Mapping {0} has no output field name."
+                .format(number)
+            )
+
+        if not text_layer:
+            raise RuntimeError(
+                "Attribute Mapping {0} has no source text layer."
+                .format(number)
+            )
+
+        validated.append((field_name, text_layer))
+
+    return validated
 
 
 def _safe_field_name(
@@ -412,6 +499,46 @@ def _safe_field_name(
     return candidate
 
 
+def _resolve_destination(
+    candidates,
+    geometry_by_id,
+    point_geometry,
+    text_value
+):
+    """Return one containing polygon ID or reject an ambiguous label."""
+    intersections = []
+    destinations = []
+
+    for feature_id in candidates:
+        polygon_geometry = geometry_by_id.get(
+            feature_id
+        )
+
+        if (
+                polygon_geometry is not None
+                and polygon_geometry.intersects(point_geometry)):
+            intersections.append(feature_id)
+
+            if polygon_geometry.contains(point_geometry):
+                destinations.append(feature_id)
+
+    if len(intersections) > 1 or len(destinations) > 1:
+        raise RuntimeError(
+            "Text label '{0}' touches or overlaps more than one polygon. "
+            "Move it clearly inside its intended polygon and retry."
+            .format(text_value)
+        )
+
+    if intersections and not destinations:
+        raise RuntimeError(
+            "Text label '{0}' lies on a polygon boundary. Move it clearly "
+            "inside its intended polygon and retry."
+            .format(text_value)
+        )
+
+    return destinations[0] if destinations else None
+
+
 def _save_layer(layer, output_path):
     options = (
         QgsVectorFileWriter.SaveVectorOptions()
@@ -427,8 +554,7 @@ def _save_layer(layer, output_path):
             )[0]
         )
         options.actionOnExistingFile = (
-            QgsVectorFileWriter
-            .CreateOrOverwriteFile
+            WRITER_CREATE_OR_OVERWRITE_FILE
         )
     else:
         options.driverName = (
@@ -436,8 +562,7 @@ def _save_layer(layer, output_path):
         )
         options.fileEncoding = "UTF-8"
         options.actionOnExistingFile = (
-            QgsVectorFileWriter
-            .CreateOrOverwriteFile
+            WRITER_CREATE_OR_OVERWRITE_FILE
         )
 
     result = (
@@ -453,8 +578,7 @@ def _save_layer(layer, output_path):
 
     error_code = result[0]
 
-    if error_code != (
-            QgsVectorFileWriter.NoError):
+    if error_code != WRITER_NO_ERROR:
         error_message = (
             result[1]
             if len(result) > 1
@@ -471,19 +595,37 @@ def build_parcel_attributes(
     boundary_layer,
     mappings,
     output_path,
-    progress_callback=None
+    progress_callback=None,
+    source_crs=None,
+    feedback=None
 ):
-    if not mappings:
+    if source_crs is None or not source_crs.isValid():
         raise RuntimeError(
-            "At least one attribute mapping is required."
+            "The actual DXF coordinate reference system must be specified."
         )
 
+    boundary_layer = str(boundary_layer or "").strip()
+
+    if not boundary_layer:
+        raise RuntimeError(
+            "A DXF boundary line layer must be selected."
+        )
+
+    mappings = _validate_mappings(mappings)
+
+    if not output_path.lower().endswith((".shp", ".gpkg")):
+        raise RuntimeError("Output must use .shp or .gpkg extension.")
+
+    _check_canceled(feedback)
+    ensure_new_output(output_path)
     dataset = _open_dataset(dwg_path)
 
-    if progress_callback:
-        progress_callback(
-            "Reading boundary lines..."
-        )
+    _report(
+        progress_callback,
+        "Reading boundary lines...",
+        8
+    )
+    _check_canceled(feedback)
 
     boundary_geometries = (
         _collect_boundary_geometries(
@@ -501,23 +643,46 @@ def build_parcel_attributes(
         boundary_geometries
     )
 
-    if progress_callback:
-        progress_callback(
-            "Building polygons..."
-        )
+    line_layer.setCrs(source_crs)
 
-    polygon_result = processing.run(
-        "native:polygonize",
-        {
-            "INPUT": line_layer,
-            "KEEP_FIELDS": False,
-            "OUTPUT": "TEMPORARY_OUTPUT",
-        }
+    _report(
+        progress_callback,
+        "Building polygons...",
+        20
     )
+    _check_canceled(feedback)
+
+    try:
+        polygon_result = processing.run(
+            "native:polygonize",
+            {
+                "INPUT": line_layer,
+                "KEEP_FIELDS": False,
+                "OUTPUT": "TEMPORARY_OUTPUT",
+            },
+            feedback=feedback
+        )
+    except Exception:
+        _check_canceled(feedback)
+        raise
+
+    _check_canceled(feedback)
 
     polygon_layer = polygon_result[
         "OUTPUT"
     ]
+
+    if not hasattr(polygon_layer, "featureCount"):
+        polygon_layer = QgsVectorLayer(
+            str(polygon_layer),
+            "ParcelForge Polygons",
+            "ogr"
+        )
+
+    if not polygon_layer.isValid():
+        raise RuntimeError(
+            "QGIS did not return a valid polygon layer."
+        )
 
     if polygon_layer.featureCount() == 0:
         raise RuntimeError(
@@ -536,6 +701,7 @@ def build_parcel_attributes(
     final_mappings = []
 
     provider = polygon_layer.dataProvider()
+    new_fields = []
 
     for field_name, text_layer in mappings:
         safe_name = _safe_field_name(
@@ -543,19 +709,42 @@ def build_parcel_attributes(
             existing,
             shapefile
         )
-        provider.addAttributes([
-            QgsField(
+        if shapefile:
+            new_field = QgsField(
                 safe_name,
-                QVariant.String,
-                len=254 if shapefile else 1000
+                FIELD_STRING,
+                len=254
             )
-        ])
+        else:
+            new_field = QgsField(
+                safe_name,
+                FIELD_STRING
+            )
+
+        new_fields.append(new_field)
         final_mappings.append((
             safe_name,
             text_layer
         ))
 
+    if not provider.addAttributes(new_fields):
+        raise RuntimeError(
+            "Could not create one or more output attribute fields."
+        )
+
     polygon_layer.updateFields()
+
+    missing_fields = [
+        field_name
+        for field_name, _ in final_mappings
+        if polygon_layer.fields().indexOf(field_name) < 0
+    ]
+
+    if missing_fields:
+        raise RuntimeError(
+            "QGIS did not create the requested output field(s): {0}"
+            .format(", ".join(missing_fields))
+        )
 
     features = list(
         polygon_layer.getFeatures()
@@ -599,42 +788,78 @@ def build_parcel_attributes(
         }
         for feature in features
     }
+    mapping_stats = []
+    mapping_total = len(final_mappings)
 
     for mapping_number, (
             field_name,
             text_layer) in enumerate(
                 final_mappings,
                 1):
-        if progress_callback:
-            progress_callback(
-                "Reading Attribute Mapping {0}..."
-                .format(mapping_number)
+        percent = 30 + int(
+            50 * (mapping_number - 1) / mapping_total
+        )
+        _report(
+            progress_callback,
+            "Reading Attribute Mapping {0} of {1}..."
+            .format(mapping_number, mapping_total),
+            percent
+        )
+        _check_canceled(feedback)
+
+        text_records = _text_records(
+            dataset,
+            text_layer
+        )
+
+        if not text_records:
+            raise RuntimeError(
+                "No usable text was found on DXF layer '{0}' for field "
+                "'{1}'."
+                .format(text_layer, field_name)
             )
 
-        for point_geometry, text_value in _text_records(
-                dataset,
-                text_layer):
+        mapped_count = 0
+        outside_count = 0
+        duplicate_count = 0
+
+        for record_number, (
+                point_geometry,
+                text_value) in enumerate(text_records, 1):
+            if record_number % 100 == 0:
+                record_fraction = (
+                    record_number / len(text_records)
+                )
+                mapping_fraction = (
+                    mapping_number - 1 + record_fraction
+                ) / mapping_total
+                _report(
+                    progress_callback,
+                    "Mapping field '{0}' ({1}/{2} labels)..."
+                    .format(
+                        field_name,
+                        record_number,
+                        len(text_records)
+                    ),
+                    30 + int(50 * mapping_fraction)
+                )
+                _check_canceled(feedback)
+
             candidates = spatial_index.intersects(
                 point_geometry.boundingBox()
             )
-
-            destination_id = None
-
-            for feature_id in candidates:
-                polygon_geometry = geometry_by_id[
-                    feature_id
-                ]
-
-                if (
-                        polygon_geometry.contains(
-                            point_geometry)
-                        or polygon_geometry.intersects(
-                            point_geometry)):
-                    destination_id = feature_id
-                    break
+            destination_id = _resolve_destination(
+                candidates,
+                geometry_by_id,
+                point_geometry,
+                text_value
+            )
 
             if destination_id is None:
+                outside_count += 1
                 continue
+
+            mapped_count += 1
 
             field_values = values[
                 destination_id
@@ -644,14 +869,48 @@ def build_parcel_attributes(
                 field_values.append(
                     text_value
                 )
+            else:
+                duplicate_count += 1
 
-    polygon_layer.startEditing()
+        if mapped_count == 0:
+            raise RuntimeError(
+                "None of the text on DXF layer '{0}' is strictly inside a "
+                "created polygon. Check the selected layers and DXF CRS."
+                .format(text_layer)
+            )
+
+        multi_value_count = sum(
+            1
+            for feature_values in values.values()
+            if len(feature_values[field_name]) > 1
+        )
+        mapping_stats.append({
+            "output_field": field_name,
+            "source_layer": text_layer,
+            "read": len(text_records),
+            "mapped": mapped_count,
+            "outside": outside_count,
+            "duplicates_ignored": duplicate_count,
+            "multi_value_polygons": multi_value_count,
+        })
+
+    _check_canceled(feedback)
+
+    if not polygon_layer.startEditing():
+        raise RuntimeError(
+            "Could not start editing the temporary polygon layer."
+        )
+
+    field_indices = {
+        field_name: polygon_layer.fields().indexOf(field_name)
+        for field_name, _ in final_mappings
+    }
 
     for feature in polygon_layer.getFeatures():
+        _check_canceled(feedback)
+
         for field_name, _ in final_mappings:
-            field_index = polygon_layer.fields().indexOf(
-                field_name
-            )
+            field_index = field_indices[field_name]
             combined = " | ".join(
                 values[feature.id()][
                     field_name
@@ -661,25 +920,47 @@ def build_parcel_attributes(
             if shapefile:
                 combined = combined[:254]
 
-            polygon_layer.changeAttributeValue(
+            if not polygon_layer.changeAttributeValue(
                 feature.id(),
                 field_index,
                 combined
-            )
+            ):
+                polygon_layer.rollBack()
+                raise RuntimeError(
+                    "Could not set field '{0}' on polygon feature {1}."
+                    .format(field_name, feature.id())
+                )
 
     if not polygon_layer.commitChanges():
+        errors = "; ".join(
+            polygon_layer.commitErrors()
+        )
+        polygon_layer.rollBack()
         raise RuntimeError(
-            "Could not write mapped attributes to the polygon layer."
+            "Could not write mapped attributes to the polygon layer.{0}"
+            .format(" " + errors if errors else "")
         )
 
-    if progress_callback:
-        progress_callback(
-            "Saving output..."
-        )
+    _report(
+        progress_callback,
+        "Saving output...",
+        90
+    )
+    _check_canceled(feedback)
+
+    # Re-check immediately before writing so a file created during processing
+    # is not silently replaced.
+    ensure_new_output(output_path)
 
     _save_layer(
         polygon_layer,
         output_path
+    )
+
+    _report(
+        progress_callback,
+        "Completed successfully.",
+        100
     )
 
     return {
@@ -689,4 +970,18 @@ def build_parcel_attributes(
             name
             for name, _ in final_mappings
         ],
+        "mapping_stats": mapping_stats,
+        "labels_read": sum(
+            item["read"] for item in mapping_stats
+        ),
+        "labels_mapped": sum(
+            item["mapped"] for item in mapping_stats
+        ),
+        "labels_outside": sum(
+            item["outside"] for item in mapping_stats
+        ),
+        "multi_value_polygons": sum(
+            item["multi_value_polygons"]
+            for item in mapping_stats
+        ),
     }

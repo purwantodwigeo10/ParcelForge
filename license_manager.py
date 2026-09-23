@@ -14,6 +14,8 @@ import webbrowser
 from urllib.parse import urlencode
 
 from .license_network import request_json
+from .license_response import has_denial
+
 
 try:
     import winreg
@@ -40,7 +42,18 @@ STATUS_ENDPOINTS = [
     BASE_URL + "/api/license/status",
 ]
 
-SIGNATURE_KEY = "RUANGSPASIAL-PARCELFORGE-PARFOR-EIN-QGIS-V1"
+# Public checksum namespace used only to detect accidental local-state edits.
+# It is not a server credential or an authentication secret.
+STATE_INTEGRITY_NAMESPACE = (
+    "RUANGSPASIAL-PARCELFORGE-PARFOR-EIN-QGIS-V1"
+)
+
+
+def _bounded_trial_used(value, fallback=0):
+    try:
+        return max(0, min(TRIAL_LIMIT, int(value or 0)))
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _machine_guid():
@@ -151,8 +164,9 @@ def _signature_payload(state):
         key: state.get(key, "")
         for key in keys
     }
-    payload["trial_used"] = int(
-        payload.get("trial_used", 0) or 0
+    payload["trial_used"] = _bounded_trial_used(
+        payload.get("trial_used", 0),
+        TRIAL_LIMIT
     )
     return payload
 
@@ -163,7 +177,7 @@ def _signature(state):
         sort_keys=True,
         separators=(",", ":")
     )
-    raw += "|" + SIGNATURE_KEY
+    raw += "|" + STATE_INTEGRITY_NAMESPACE
     return hashlib.sha256(
         raw.encode("utf-8")
     ).hexdigest().upper()
@@ -174,6 +188,12 @@ def save_state(state):
         _state_folder(),
         exist_ok=True
     )
+
+    try:
+        os.chmod(_state_folder(), 0o700)
+    except OSError:
+        pass
+
     state.update({
         "product": PRODUCT_NAME,
         "product_code": PRODUCT_CODE,
@@ -182,6 +202,10 @@ def save_state(state):
         "version": VERSION,
         "device_id": device_id(),
     })
+    state["trial_used"] = _bounded_trial_used(
+        state.get("trial_used", 0),
+        TRIAL_LIMIT
+    )
     state["signature"] = _signature(state)
 
     temp_path = _state_path() + ".tmp"
@@ -197,6 +221,11 @@ def save_state(state):
             sort_keys=True
         )
     os.replace(temp_path, _state_path())
+
+    try:
+        os.chmod(_state_path(), 0o600)
+    except OSError:
+        pass
 
 
 def load_state():
@@ -227,8 +256,9 @@ def load_state():
 
         if saved_signature != _signature(loaded):
             state["status"] = "unknown"
-            state["trial_used"] = int(
-                loaded.get("trial_used", 0) or 0
+            state["trial_used"] = _bounded_trial_used(
+                loaded.get("trial_used", TRIAL_LIMIT),
+                TRIAL_LIMIT
             )
             state["activation_code"] = str(
                 loaded.get("activation_code", "")
@@ -246,8 +276,10 @@ def load_state():
 
     except Exception:
         state["status"] = "unknown"
+        state["trial_used"] = TRIAL_LIMIT
         state["message"] = (
-            "The local license could not be read."
+            "The local license could not be read and requires online "
+            "validation."
         )
         return state
 
@@ -256,8 +288,9 @@ def trial_remaining(state=None):
     state = state or load_state()
     return max(
         0,
-        TRIAL_LIMIT - int(
-            state.get("trial_used", 0) or 0
+        TRIAL_LIMIT - _bounded_trial_used(
+            state.get("trial_used", 0),
+            TRIAL_LIMIT
         )
     )
 
@@ -313,24 +346,37 @@ def _nested_dicts(value):
 
 
 def _status_from_response(response):
+    if has_denial(response):
+        return "inactive"
+
     for current in _nested_dicts(response):
+        normalized_current = {
+            str(key).strip().lower(): value
+            for key, value in current.items()
+        }
+
         for key in [
             "active",
             "valid",
             "is_active",
             "activated",
         ]:
-            if key in current:
-                value = current[key]
-                if value is True:
+            if key in normalized_current:
+                value = normalized_current[key]
+                normalized_value = str(value).strip().lower()
+
+                if value is True or normalized_value in {
+                        "true", "1", "yes"}:
                     return "active"
-                if value is False:
+
+                if value is False or normalized_value in {
+                        "false", "0", "no"}:
                     return "inactive"
 
         value = str(
-            current.get("status")
-            or current.get("license_status")
-            or current.get("activation_status")
+            normalized_current.get("status")
+            or normalized_current.get("license_status")
+            or normalized_current.get("activation_status")
             or ""
         ).strip().lower()
 
@@ -352,14 +398,20 @@ def _status_from_response(response):
         }:
             return "inactive"
 
-        if current.get("success") is True:
+        success = normalized_current.get("success")
+        normalized_success = str(success).strip().lower()
+
+        if success is True or normalized_success in {
+                "true", "1", "yes"}:
             return "active"
-        if current.get("success") is False:
+
+        if success is False or normalized_success in {
+                "false", "0", "no"}:
             return "inactive"
 
         message = str(
-            current.get("message")
-            or current.get("detail")
+            normalized_current.get("message")
+            or normalized_current.get("detail")
             or ""
         ).lower()
 
@@ -391,6 +443,11 @@ def _status_from_response(response):
 
 def _message(response, fallback):
     for current in _nested_dicts(response):
+        normalized_current = {
+            str(key).strip().lower(): value
+            for key, value in current.items()
+        }
+
         for key in [
             "message",
             "detail",
@@ -398,13 +455,14 @@ def _message(response, fallback):
             "reason",
             "error",
         ]:
-            if current.get(key):
-                return str(current[key])
+            if normalized_current.get(key):
+                return str(normalized_current[key])
     return fallback
 
 
 def _try_endpoints(endpoints, payloads):
     errors = []
+    inactive_result = None
 
     for endpoint in endpoints:
         for payload in payloads:
@@ -419,14 +477,25 @@ def _try_endpoints(endpoints, payloads):
                     status = _status_from_response(
                         response
                     )
-                    if status:
+
+                    if status == "active":
                         return (
+                            response,
+                            endpoint,
+                            method
+                        )
+
+                    if status == "inactive" and inactive_result is None:
+                        inactive_result = (
                             response,
                             endpoint,
                             method
                         )
                 except Exception as exc:
                     errors.append(str(exc))
+
+    if inactive_result is not None:
+        return inactive_result
 
     return (
         None,
@@ -548,7 +617,12 @@ def refresh():
 def access_status(refresh_online=False):
     state = load_state()
 
-    if refresh_online:
+    should_refresh = bool(
+        state.get("status") == "active"
+        or state.get("activation_code")
+    )
+
+    if refresh_online and should_refresh:
         result, message = refresh()
 
         if result is True:
@@ -602,7 +676,10 @@ def record_success(mode):
     state = load_state()
     state["trial_used"] = min(
         TRIAL_LIMIT,
-        int(state.get("trial_used", 0) or 0) + 1
+        _bounded_trial_used(
+            state.get("trial_used", 0),
+            TRIAL_LIMIT
+        ) + 1
     )
 
     if state["trial_used"] >= TRIAL_LIMIT:

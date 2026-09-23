@@ -10,8 +10,8 @@ about=ParcelForge converts clean, closed DXF boundary linework into polygon feat
 category=Vector
 icon=icon.png
 homepage=https://aktivasi.ruangspasial.my.id/help/parcelforge-qgis
-tracker=https://github.com/purwantodwigeo10/parcelforge-qgis/issues
-repository=https://github.com/purwantodwigeo10/parcelforge-qgis
+tracker=https://github.com/purwantodwigeo10/ParcelForge/issues
+repository=https://github.com/purwantodwigeo10/ParcelForge
 license=GPL-3.0-or-later
 experimental=False
 deprecated=False
@@ -19,7 +19,12 @@ server=False
 hasProcessingProvider=False
 tags=cad,dxf,parcel,polygonize,text,attributes,land
 changelog=26.1.0
-    Improved polygon creation from closed DXF boundary lines.
-    Improved DXF text-to-attribute mapping and output validation.
-    Improved geometry-type discovery and spatial-index compatibility.
-    Added sample data and clearer usage documentation.
+    Build polygons from clean DXF boundaries and map up to ten text layers.
+    Require explicit DXF CRS assignment without changing coordinates.
+    Reject ambiguous boundary labels and report skipped outside labels.
+    Stop when a mapping would silently produce no assigned value.
+    Add progress, cancellation, output protection, and complete result counts.
+    Validate fields, attribute updates, and final writer results.
+    Fix scoped QGIS/Qt enums for current automated compatibility checks.
+    Harden HTTPS activation response handling and avoid trial-only network calls.
+    Include synthetic sample data, documentation, and publication guidance.

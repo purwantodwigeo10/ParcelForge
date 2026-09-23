@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: GPL-3.0-or-later
+"""ParcelForge dialogs and processing workflow."""
 
 import os
 
@@ -17,6 +18,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -25,10 +27,18 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from qgis.core import QgsProject, QgsVectorLayer
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsProcessingFeedback,
+    QgsProject,
+    QgsVectorLayer,
+)
+from qgis.gui import QgsProjectionSelectionWidget
 
 from . import cad_reader
 from . import license_manager
+from .output_safety import ensure_new_output
+from .run_guard import single_run
 
 
 APP_STYLE = """
@@ -110,6 +120,22 @@ QLabel#progressLabel {
     color: #8b460c;
     padding: 5px 8px;
     font-size: 8.5pt;
+}
+
+QProgressBar {
+    min-height: 14px;
+    max-height: 14px;
+    border: 1px solid #d7dbe0;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #5d636a;
+    text-align: center;
+    font-size: 7.5pt;
+}
+
+QProgressBar::chunk {
+    background: #ff8a38;
+    border-radius: 5px;
 }
 
 QLineEdit,
@@ -235,6 +261,14 @@ def _enable_standard_window_controls(dialog):
     dialog.setSizeGripEnabled(True)
 
 
+class ResponsiveProcessingFeedback(QgsProcessingFeedback):
+    """Keep the Cancel button responsive during a QGIS algorithm."""
+
+    def setProgress(self, progress):
+        super().setProgress(progress)
+        QApplication.processEvents()
+
+
 class ActivationDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -328,7 +362,8 @@ class ActivationDialog(QDialog):
     def activate_or_refresh(self):
         code = self.code_value.text().strip()
 
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.activate_button.setEnabled(False)
 
         try:
             if code:
@@ -350,7 +385,17 @@ class ActivationDialog(QDialog):
 
             self.message_label.setText(message)
 
+        except Exception as exc:
+            self.message_label.setStyleSheet(
+                "color:#b42318; font-weight:600; padding:4px;"
+            )
+            self.message_label.setText(
+                "Activation could not be completed: {0}"
+                .format(exc)
+            )
+
         finally:
+            self.activate_button.setEnabled(True)
             QApplication.restoreOverrideCursor()
 
 
@@ -363,6 +408,7 @@ class ParcelForgeDialog(QDialog):
         self.iface = iface
         self.plugin_dir = plugin_dir
         self.mapping_rows = []
+        self.processing_feedback = None
 
         self.setWindowTitle(
             "ParcelForge — DXF Polygon and Attribute Builder"
@@ -392,8 +438,8 @@ class ParcelForgeDialog(QDialog):
             logo_pixmap.scaled(
                 150,
                 31,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
             )
         )
         logo_label.setFixedWidth(156)
@@ -413,7 +459,7 @@ class ParcelForgeDialog(QDialog):
 
         self.status_label = QLabel()
         self.status_label.setObjectName("statusPill")
-        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_label.setMinimumWidth(92)
         self.status_label.setMaximumWidth(112)
 
@@ -427,17 +473,17 @@ class ParcelForgeDialog(QDialog):
         header_actions.addWidget(
             self.status_label,
             0,
-            Qt.AlignRight
+            Qt.AlignmentFlag.AlignRight
         )
         header_actions.addWidget(
             self.activation_button,
             0,
-            Qt.AlignRight
+            Qt.AlignmentFlag.AlignRight
         )
         header_actions.addWidget(
             self.guide_button,
             0,
-            Qt.AlignRight
+            Qt.AlignmentFlag.AlignRight
         )
 
         top_layout.addLayout(header_actions)
@@ -469,8 +515,8 @@ class ParcelForgeDialog(QDialog):
 
         self.boundary_combo = QComboBox()
         self.boundary_combo.setSizePolicy(
-            QSizePolicy.Expanding,
-            QSizePolicy.Fixed
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed
         )
 
         input_form.addRow("Input DXF File", dwg_widget)
@@ -479,6 +525,9 @@ class ParcelForgeDialog(QDialog):
             self.boundary_combo
         )
 
+        self.source_crs = QgsProjectionSelectionWidget()
+        self.source_crs.setCrs(QgsCoordinateReferenceSystem())
+        input_form.addRow("DXF CRS (assign only)", self.source_crs)
         root.addWidget(input_group)
 
         # Attribute mapping frame
@@ -519,7 +568,7 @@ class ParcelForgeDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
 
         scroll_content = QWidget()
         self.mapping_container = QVBoxLayout(
@@ -551,8 +600,8 @@ class ParcelForgeDialog(QDialog):
 
             source_layer = QComboBox()
             source_layer.setSizePolicy(
-                QSizePolicy.Expanding,
-                QSizePolicy.Fixed
+                QSizePolicy.Policy.Expanding,
+                QSizePolicy.Policy.Fixed
             )
 
             row_form.addRow(
@@ -616,6 +665,11 @@ class ParcelForgeDialog(QDialog):
         self.progress_label.setWordWrap(True)
         root.addWidget(self.progress_label)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        root.addWidget(self.progress_bar)
+
         # Compact action bar
         bottom_bar = QFrame()
         bottom_bar.setObjectName("bottomBar")
@@ -634,16 +688,24 @@ class ParcelForgeDialog(QDialog):
         )
         self.run_button.setMinimumWidth(145)
 
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setMinimumWidth(80)
+        self.cancel_button.setEnabled(False)
+
         self.close_button = QPushButton("Close")
         self.close_button.setMinimumWidth(90)
 
         bottom.addWidget(self.run_button)
+        bottom.addWidget(self.cancel_button)
         bottom.addWidget(self.close_button)
 
         root.addWidget(bottom_bar)
 
         self.dwg_browse.clicked.connect(
             self.select_dwg
+        )
+        self.dwg_path.editingFinished.connect(
+            self.load_cad_layers
         )
         self.output_browse.clicked.connect(
             self.select_output
@@ -659,6 +721,9 @@ class ParcelForgeDialog(QDialog):
         )
         self.run_button.clicked.connect(
             self.run_process
+        )
+        self.cancel_button.clicked.connect(
+            self.cancel_process
         )
         self.close_button.clicked.connect(
             self.reject
@@ -744,7 +809,7 @@ class ParcelForgeDialog(QDialog):
             return
 
         QApplication.setOverrideCursor(
-            Qt.WaitCursor
+            Qt.CursorShape.WaitCursor
         )
         self.progress_label.setText(
             "Reading DXF layers..."
@@ -837,12 +902,60 @@ class ParcelForgeDialog(QDialog):
 
     def open_activation(self):
         dialog = ActivationDialog(self)
-        dialog.exec_()
+        dialog.exec()
         self.refresh_status()
 
-    def progress(self, message):
+    def progress(self, message, percent=None):
         self.progress_label.setText(message)
+
+        if percent is not None:
+            bounded_percent = max(
+                0,
+                min(100, int(percent))
+            )
+            self.progress_bar.setValue(bounded_percent)
+
+            if bounded_percent >= 90:
+                self.cancel_button.setEnabled(False)
+
         QApplication.processEvents()
+
+    def cancel_process(self):
+        if self.processing_feedback is None:
+            return
+
+        self.cancel_button.setEnabled(False)
+        self.progress_label.setText(
+            "Canceling safely..."
+        )
+        self.processing_feedback.cancel()
+        QApplication.processEvents()
+
+    def _set_processing_state(self, running):
+        self.run_button.setEnabled(not running)
+        self.cancel_button.setEnabled(running)
+        self.close_button.setEnabled(not running)
+        self.dwg_browse.setEnabled(not running)
+        self.output_browse.setEnabled(not running)
+        self.dwg_path.setEnabled(not running)
+        self.output_path.setEnabled(not running)
+        self.boundary_combo.setEnabled(not running)
+        self.source_crs.setEnabled(not running)
+        self.mapping_count.setEnabled(not running)
+        self.activation_button.setEnabled(not running)
+        self.guide_button.setEnabled(not running)
+
+        for row in self.mapping_rows:
+            row["field"].setEnabled(not running)
+            row["layer"].setEnabled(not running)
+
+    def closeEvent(self, event):
+        if self.processing_feedback is not None:
+            self.cancel_process()
+            event.ignore()
+            return
+
+        super().closeEvent(event)
 
     def validate_inputs(self):
         dwg_path = self.dwg_path.text().strip()
@@ -880,6 +993,21 @@ class ParcelForgeDialog(QDialog):
                 "Select an Output Polygon Layer."
             )
 
+        if not output_path.lower().endswith((".gpkg", ".shp")):
+            raise ValueError(
+                "Output must use the .gpkg or .shp extension."
+            )
+
+        try:
+            ensure_new_output(output_path)
+        except RuntimeError as exc:
+            raise ValueError(str(exc)) from exc
+
+        if not self.source_crs.crs().isValid():
+            raise ValueError(
+                "Select the actual CRS of the DXF coordinates. This assigns "
+                "a CRS; it does not transform coordinates."
+            )
         mappings = []
 
         for index in range(
@@ -921,7 +1049,24 @@ class ParcelForgeDialog(QDialog):
             output_path
         )
 
+    @single_run
     def run_process(self):
+        try:
+            (
+                dwg_path,
+                boundary_layer,
+                mappings,
+                output_path
+            ) = self.validate_inputs()
+
+        except ValueError as exc:
+            QMessageBox.warning(
+                self,
+                "ParcelForge",
+                str(exc)
+            )
+            return
+
         mode, message = (
             license_manager.access_status(
                 refresh_online=True
@@ -939,26 +1084,12 @@ class ParcelForgeDialog(QDialog):
             self.open_activation()
             return
 
-        try:
-            (
-                dwg_path,
-                boundary_layer,
-                mappings,
-                output_path
-            ) = self.validate_inputs()
-
-        except ValueError as exc:
-            QMessageBox.warning(
-                self,
-                "ParcelForge",
-                str(exc)
-            )
-            return
-
         QApplication.setOverrideCursor(
-            Qt.WaitCursor
+            Qt.CursorShape.WaitCursor
         )
-        self.run_button.setEnabled(False)
+        self.processing_feedback = ResponsiveProcessingFeedback()
+        self._set_processing_state(True)
+        self.progress_bar.setValue(0)
         self.progress_label.setText(
             "Starting ParcelForge..."
         )
@@ -971,7 +1102,9 @@ class ParcelForgeDialog(QDialog):
                     boundary_layer,
                     mappings,
                     output_path,
-                    self.progress
+                    self.progress,
+                    source_crs=self.source_crs.crs(),
+                    feedback=self.processing_feedback
                 )
             )
 
@@ -991,21 +1124,53 @@ class ParcelForgeDialog(QDialog):
                     output_layer
                 )
 
+            summary = (
+                "ParcelForge completed successfully.\n\n"
+                "Polygons: {0}\n"
+                "Labels read: {1}\n"
+                "Labels mapped: {2}\n"
+                "Labels outside polygons: {3}\n"
+                "Polygons with multiple unique values: {4}\n"
+                "Output: {5}"
+            ).format(
+                result["polygon_count"],
+                result["labels_read"],
+                result["labels_mapped"],
+                result["labels_outside"],
+                result["multi_value_polygons"],
+                result["output_path"]
+            )
+
             self.progress_label.setText(
                 "Completed successfully."
             )
+            self.progress_bar.setValue(100)
 
+            if (
+                    result["labels_outside"] > 0
+                    or result["multi_value_polygons"] > 0):
+                QMessageBox.warning(
+                    self,
+                    "ParcelForge — Completed with warnings",
+                    summary
+                )
+
+            else:
+                QMessageBox.information(
+                    self,
+                    "ParcelForge",
+                    summary
+                )
+
+        except cad_reader.ParcelForgeCanceled as exc:
+            self.progress_label.setText(
+                "Canceled. No output was written."
+            )
+            self.progress_bar.setValue(0)
             QMessageBox.information(
                 self,
                 "ParcelForge",
-                (
-                    "ParcelForge completed successfully.\n\n"
-                    "Polygons: {0}\n"
-                    "Output: {1}"
-                ).format(
-                    result["polygon_count"],
-                    result["output_path"]
-                )
+                str(exc)
             )
 
         except Exception as exc:
@@ -1019,5 +1184,6 @@ class ParcelForgeDialog(QDialog):
             )
 
         finally:
-            self.run_button.setEnabled(True)
+            self.processing_feedback = None
+            self._set_processing_state(False)
             QApplication.restoreOverrideCursor()
