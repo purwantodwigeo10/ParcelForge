@@ -4,9 +4,9 @@ qgisMinimumVersion=3.22
 qgisMaximumVersion=3.99
 description=Build polygons from DXF boundary lines and transfer DXF text into up to ten polygon attributes.
 version=26.1.0
-author=Dwi Purwanto
+author=Dwi Purwanto (Ruang Spasial)
 email=ruangspasial@gmail.com
-about=ParcelForge converts clean, closed DXF boundary linework into polygon features and maps text from as many as ten DXF layers into user-defined polygon attributes. Output can be GeoPackage or Shapefile. DXF support is supplied by GDAL in QGIS; DWG is intentionally not accepted. License activation uses the Ruang Spasial License Hub over HTTPS. No CAD or GIS dataset is transmitted to the service.
+about=ParcelForge converts clean, closed DXF boundary linework into polygon features and maps text from as many as ten DXF layers into user-defined polygon attributes. Output can be GeoPackage or Shapefile. The QGIS edition accepts DXF input; DWG is not accepted.
 category=Vector
 icon=icon.png
 homepage=https://aktivasi.ruangspasial.my.id/help/parcelforge-qgis
@@ -19,12 +19,10 @@ server=False
 hasProcessingProvider=False
 tags=cad,dxf,parcel,polygonize,text,attributes,land
 changelog=26.1.0
-    Build polygons from clean DXF boundaries and map up to ten text layers.
-    Require explicit DXF CRS assignment without changing coordinates.
-    Reject ambiguous boundary labels and report skipped outside labels.
-    Stop when a mapping would silently produce no assigned value.
-    Add progress, cancellation, output protection, and complete result counts.
-    Validate fields, attribute updates, and final writer results.
-    Fix scoped QGIS/Qt enums for current automated compatibility checks.
-    Harden HTTPS activation response handling and avoid trial-only network calls.
-    Include synthetic sample data, documentation, and publication guidance.
+    Builds parcel polygons from clean and closed DXF boundary lines.
+    Transfers text from up to ten DXF layers into user-defined polygon attributes.
+    Assigns the selected CRS and supports GeoPackage or Shapefile output.
+    Reports labels mapped, outside polygons, duplicated, and combined.
+    Rejects ambiguous boundary labels and invalid empty mappings.
+    Displays live 0-100 percent progress with safe cancellation.
+    Includes synthetic DXF sample data and usage documentation.

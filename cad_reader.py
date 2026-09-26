@@ -959,8 +959,8 @@ def build_parcel_attributes(
 
     _report(
         progress_callback,
-        "Completed successfully.",
-        100
+        "Output created and validated.",
+        96
     )
 
     return {

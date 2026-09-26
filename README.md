@@ -73,28 +73,19 @@ labels on `OWNER`.
 4. Save to a new GeoPackage.
 5. Expect two polygons with `OWNER_A` and `OWNER_B`.
 
-## Activation and privacy
+## Activation
 
 - Product code: `PARFOR`
 - Fixed code: `EIN`
 - Trial: 2 successful processing runs
 
-Trial use is recorded only after a successful output is created. A new trial
-does not require an online check. Activation and active-license verification
-use QGIS' network manager and HTTPS at `aktivasi.ruangspasial.my.id`. Only the
-product identity, activation code, and a pseudonymous Device ID are sent.
-CAD/GIS content and file paths are never transmitted. Local activation state is
-stored in the current user's application-data directory.
+Trial use is recorded only after a successful output is created.
 
 ## Source, help, and support
 
 - Help: <https://aktivasi.ruangspasial.my.id/help/parcelforge-qgis>
 - Source: <https://github.com/purwantodwigeo10/ParcelForge>
 - Issues: <https://github.com/purwantodwigeo10/ParcelForge/issues>
-
-See [REVISION_NOTES.md](REVISION_NOTES.md) for validation scope and
-[PUBLISHING_GUIDE_ID.md](PUBLISHING_GUIDE_ID.md) for the GitHub/QGIS upload
-procedure.
 
 Copyright (C) 2026 Dwi Purwanto / Ruang Spasial. Licensed under
 GPL-3.0-or-later; see `LICENSE`.

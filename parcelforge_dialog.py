@@ -38,6 +38,7 @@ from qgis.gui import QgsProjectionSelectionWidget
 from . import cad_reader
 from . import license_manager
 from .output_safety import ensure_new_output
+from .qt_compat import run_dialog_or_loop
 from .run_guard import single_run
 
 
@@ -362,7 +363,7 @@ class ActivationDialog(QDialog):
     def activate_or_refresh(self):
         code = self.code_value.text().strip()
 
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         self.activate_button.setEnabled(False)
 
         try:
@@ -438,8 +439,8 @@ class ParcelForgeDialog(QDialog):
             logo_pixmap.scaled(
                 150,
                 31,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
             )
         )
         logo_label.setFixedWidth(156)
@@ -459,7 +460,7 @@ class ParcelForgeDialog(QDialog):
 
         self.status_label = QLabel()
         self.status_label.setObjectName("statusPill")
-        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setMinimumWidth(92)
         self.status_label.setMaximumWidth(112)
 
@@ -473,17 +474,17 @@ class ParcelForgeDialog(QDialog):
         header_actions.addWidget(
             self.status_label,
             0,
-            Qt.AlignmentFlag.AlignRight
+            Qt.AlignRight
         )
         header_actions.addWidget(
             self.activation_button,
             0,
-            Qt.AlignmentFlag.AlignRight
+            Qt.AlignRight
         )
         header_actions.addWidget(
             self.guide_button,
             0,
-            Qt.AlignmentFlag.AlignRight
+            Qt.AlignRight
         )
 
         top_layout.addLayout(header_actions)
@@ -515,8 +516,8 @@ class ParcelForgeDialog(QDialog):
 
         self.boundary_combo = QComboBox()
         self.boundary_combo.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Fixed
+            QSizePolicy.Expanding,
+            QSizePolicy.Fixed
         )
 
         input_form.addRow("Input DXF File", dwg_widget)
@@ -568,7 +569,7 @@ class ParcelForgeDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFrameShape(QFrame.NoFrame)
 
         scroll_content = QWidget()
         self.mapping_container = QVBoxLayout(
@@ -600,8 +601,8 @@ class ParcelForgeDialog(QDialog):
 
             source_layer = QComboBox()
             source_layer.setSizePolicy(
-                QSizePolicy.Policy.Expanding,
-                QSizePolicy.Policy.Fixed
+                QSizePolicy.Expanding,
+                QSizePolicy.Fixed
             )
 
             row_form.addRow(
@@ -808,9 +809,8 @@ class ParcelForgeDialog(QDialog):
         if not path:
             return
 
-        QApplication.setOverrideCursor(
-            Qt.CursorShape.WaitCursor
-        )
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        self.progress_bar.setValue(0)
         self.progress_label.setText(
             "Reading DXF layers..."
         )
@@ -854,17 +854,19 @@ class ParcelForgeDialog(QDialog):
                 )
 
             self.progress_label.setText(
-                "Loaded {0} boundary layer(s) and "
-                "{1} text layer(s).".format(
+                "Ready. Loaded {0} boundary layer(s) and "
+                "{1} text layer(s). Progress will start from 0%.".format(
                     len(boundary_layers),
                     len(text_layers)
                 )
             )
+            self.progress_bar.setValue(0)
 
         except Exception as exc:
             self.progress_label.setText(
                 "Could not read the DXF file."
             )
+            self.progress_bar.setValue(0)
             QMessageBox.critical(
                 self,
                 "ParcelForge",
@@ -902,7 +904,7 @@ class ParcelForgeDialog(QDialog):
 
     def open_activation(self):
         dialog = ActivationDialog(self)
-        dialog.exec()
+        run_dialog_or_loop(dialog)
         self.refresh_status()
 
     def progress(self, message, percent=None):
@@ -1051,6 +1053,14 @@ class ParcelForgeDialog(QDialog):
 
     @single_run
     def run_process(self):
+        # Every new processing run starts visibly from zero, including the
+        # input-validation and active-license check stages.
+        self.progress_bar.setValue(0)
+        self.progress_label.setText(
+            "0% — Preparing ParcelForge..."
+        )
+        QApplication.processEvents()
+
         try:
             (
                 dwg_path,
@@ -1060,6 +1070,10 @@ class ParcelForgeDialog(QDialog):
             ) = self.validate_inputs()
 
         except ValueError as exc:
+            self.progress_bar.setValue(0)
+            self.progress_label.setText(
+                "0% — Correct the input settings before running."
+            )
             QMessageBox.warning(
                 self,
                 "ParcelForge",
@@ -1076,6 +1090,10 @@ class ParcelForgeDialog(QDialog):
         self.refresh_status()
 
         if mode == "inactive":
+            self.progress_bar.setValue(0)
+            self.progress_label.setText(
+                "0% — Activation is required before processing."
+            )
             QMessageBox.warning(
                 self,
                 "ParcelForge Activation",
@@ -1084,9 +1102,7 @@ class ParcelForgeDialog(QDialog):
             self.open_activation()
             return
 
-        QApplication.setOverrideCursor(
-            Qt.CursorShape.WaitCursor
-        )
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         self.processing_feedback = ResponsiveProcessingFeedback()
         self._set_processing_state(True)
         self.progress_bar.setValue(0)

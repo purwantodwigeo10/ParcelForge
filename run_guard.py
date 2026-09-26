@@ -15,7 +15,9 @@ def single_run(function):
         self._operation_running = True
 
         try:
-            return function(self, *args, **kwargs)
+            # Qt's clicked(bool) signal may supply a checked-state argument.
+            # Processing methods do not consume it.
+            return function(self)
         finally:
             self._operation_running = False
 

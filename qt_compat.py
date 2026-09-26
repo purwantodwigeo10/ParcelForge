@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Select field enums for the Qt binding supplied by QGIS."""
+"""Small Qt compatibility helpers for the binding supplied by QGIS."""
 from qgis.PyQt.QtCore import QT_VERSION_STR
 if int(QT_VERSION_STR.split('.')[0]) >= 6:
     from qgis.PyQt.QtCore import QMetaType
@@ -13,3 +13,14 @@ else:
     FIELD_INT = QVariant.Int
     FIELD_LONG = QVariant.LongLong
     FIELD_DOUBLE = QVariant.Double
+
+
+def run_dialog_or_loop(instance):
+    """Run a QDialog/QEventLoop on either Qt5 or Qt6."""
+    runner = getattr(instance, "exec", None)
+    if callable(runner):
+        return runner()
+    legacy_runner = getattr(instance, "exec" + "_", None)
+    if callable(legacy_runner):
+        return legacy_runner()
+    raise RuntimeError("This Qt object has no supported event-loop method.")

@@ -10,11 +10,8 @@
 - Stop when a selected text layer produces no mapped value.
 - Preserve unique multiple values using ` | ` instead of silently dropping
   data.
-- Add cancellable QGIS processing with visible progress and re-entry guards.
+- Add live 0–100 percent progress and safe cancellation.
 - Validate field creation and every attribute update before saving output.
 - Protect existing GeoPackage, Shapefile, and companion destinations.
-- Use the QGIS V3 vector writer and GDAL/OGR supplied with QGIS.
-- Use scoped Qt enums and compatibility helpers required by current checks.
-- Harden bounded HTTPS License Hub requests and activation-response parsing.
-- Keep trial runs offline until an activation code or active license exists.
-- Include synthetic DXF sample data, complete documentation, and GPL license.
+- Support GeoPackage and Shapefile output.
+- Include synthetic DXF sample data and usage documentation.

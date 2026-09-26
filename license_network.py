@@ -2,6 +2,7 @@
 """Bounded HTTPS License Hub requests using QGIS proxy/TLS settings."""
 import json
 from urllib.parse import urlencode, urlparse
+from .qt_compat import run_dialog_or_loop
 try:
     from qgis.PyQt.QtCore import QByteArray, QEventLoop, QTimer, QUrl
     from qgis.PyQt.QtNetwork import QNetworkReply, QNetworkRequest
@@ -42,14 +43,14 @@ def request_json(method, url, payload=None, timeout=10, user_agent="QGISPlugin")
     request.setRawHeader(QByteArray(b"User-Agent"),
                          QByteArray(user_agent.encode("ascii", "ignore")))
     # Do not forward activation data to any redirected endpoint.
-    request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
-                         QNetworkRequest.RedirectPolicy.ManualRedirectPolicy)
+    request.setAttribute(QNetworkRequest.RedirectPolicyAttribute,
+                         QNetworkRequest.ManualRedirectPolicy)
     manager = QgsNetworkAccessManager.instance()
     if method == "GET":
         reply = manager.get(request)
     else:
         request.setHeader(
-            QNetworkRequest.KnownHeaders.ContentTypeHeader, "application/json")
+            QNetworkRequest.ContentTypeHeader, "application/json")
         reply = manager.post(request, QByteArray(
             json.dumps(payload or {}).encode("utf-8")))
     loop = QEventLoop()
@@ -76,7 +77,7 @@ def request_json(method, url, payload=None, timeout=10, user_agent="QGISPlugin")
     timer.timeout.connect(loop.quit)
     timer.start(max(1, int(float(timeout) * 1000)))
     if not reply.isFinished():
-        loop.exec()
+        run_dialog_or_loop(loop)
     timer.stop()
     try:
         if too_large[0]:
@@ -87,10 +88,10 @@ def request_json(method, url, payload=None, timeout=10, user_agent="QGISPlugin")
         drain()
         if too_large[0]:
             return None, "License Hub response exceeded the size limit."
-        status = reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+        status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
         if status is None or not 200 <= int(status) < 300:
             return None, "License Hub returned HTTP %s." % status
-        if reply.error() != QNetworkReply.NetworkError.NoError:
+        if reply.error() != QNetworkReply.NoError:
             return None, "License Hub request failed: %s" % reply.errorString()
         if not is_allowed_url(reply.url().toString()):
             return None, "License Hub response came from an untrusted URL."
